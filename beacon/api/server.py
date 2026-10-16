@@ -201,6 +201,32 @@ class AuthVerifyRequest(BaseModel):
     pin: str
 
 
+class PolicyUpdateRequest(BaseModel):
+    mode: Optional[str] = None
+    auto_protect_enabled: Optional[bool] = None
+    default_duration_seconds: Optional[int] = None
+    max_active_rules: Optional[int] = None
+    rate_limit_blocks_per_minute: Optional[int] = None
+    allowlist_ips: Optional[List[str]] = None
+    allowlist_cidrs: Optional[List[str]] = None
+    critical_infrastructure: Optional[List[str]] = None
+
+
+class ManualBlockRequest(BaseModel):
+    destination_ip: str
+    duration_seconds: Optional[int] = None
+    reason: Optional[str] = "Manual operator block"
+
+
+class ApproveBlockRequest(BaseModel):
+    duration_seconds: Optional[int] = None
+
+
+class RevokeBlockRequest(BaseModel):
+    reason: Optional[str] = "Operator revoked"
+
+
+
 @app.get("/api/auth/status")
 async def get_auth_status(
     x_beacon_pin: Optional[str] = Header(None, alias="X-Beacon-PIN"),
@@ -1140,6 +1166,139 @@ async def export_live_incident_pcap(incident_id: str):
     )
 
 
+# -------------------------------------------------------------------------
+# Safe Threat Prevention Endpoints
+# -------------------------------------------------------------------------
+
+@app.get("/api/prevention/status", dependencies=[Depends(verify_access_pin)])
+async def get_prevention_status_endpoint() -> Dict[str, Any]:
+    """Diagnostic status of prevention engine, active adapter, and rule count."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    return service.get_status()
+
+
+@app.get("/api/prevention/policy", dependencies=[Depends(verify_access_pin)])
+async def get_prevention_policy_endpoint() -> Dict[str, Any]:
+    """Retrieve current threat prevention policy."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    return service.policy.to_dict()
+
+
+@app.post("/api/prevention/policy", dependencies=[Depends(verify_access_pin)])
+async def update_prevention_policy_endpoint(req: PolicyUpdateRequest) -> Dict[str, Any]:
+    """Update and persist threat prevention policy."""
+    from beacon.prevention import EnforcementMode, get_prevention_service
+    service = get_prevention_service()
+    cur = service.policy
+
+    if req.mode is not None:
+        try:
+            cur.mode = EnforcementMode(req.mode.lower())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid enforcement mode '{req.mode}'. Choose from 'monitor', 'ask', 'auto'.")
+
+    if req.auto_protect_enabled is not None:
+        cur.auto_protect_enabled = bool(req.auto_protect_enabled)
+
+    if req.default_duration_seconds is not None:
+        cur.default_duration_seconds = max(10, min(req.default_duration_seconds, cur.max_duration_seconds))
+
+    if req.max_active_rules is not None:
+        cur.max_active_rules = max(1, min(req.max_active_rules, 1000))
+
+    if req.rate_limit_blocks_per_minute is not None:
+        cur.rate_limit_blocks_per_minute = max(1, min(req.rate_limit_blocks_per_minute, 60))
+
+    if req.allowlist_ips is not None:
+        cur.allowlist_ips = set(req.allowlist_ips)
+
+    if req.allowlist_cidrs is not None:
+        cur.allowlist_cidrs = list(req.allowlist_cidrs)
+
+    if req.critical_infrastructure is not None:
+        cur.critical_infrastructure = set(req.critical_infrastructure)
+
+    updated = service.update_policy(cur)
+    return updated.to_dict()
+
+
+@app.get("/api/prevention/rules", dependencies=[Depends(verify_access_pin)])
+async def list_prevention_rules_endpoint(
+    status: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """List threat prevention rules (active, pending, expired, revoked, or all)."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    rules = service.store.list_rules(status=status)
+    return {
+        "rules": [r.to_dict() for r in rules],
+        "total": len(rules),
+        "active_count": len([r for r in rules if r.is_active]),
+    }
+
+
+@app.post("/api/prevention/block", dependencies=[Depends(verify_access_pin)])
+async def manual_block_endpoint(req: ManualBlockRequest) -> Dict[str, Any]:
+    """Manually apply a drop rule to a suspicious destination IP."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    try:
+        rule = service.manual_block(
+            destination_ip=req.destination_ip,
+            duration_seconds=req.duration_seconds,
+            reason=req.reason or "Manual operator block",
+            user="api_operator",
+        )
+        if not rule.verified or rule.status.value == "failed":
+            raise HTTPException(status_code=500, detail=rule.error_message or "Failed to verify firewall rule")
+        return rule.to_dict()
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+
+
+@app.post("/api/prevention/rules/{rule_id}/approve", dependencies=[Depends(verify_access_pin)])
+async def approve_block_endpoint(rule_id: str, req: Optional[ApproveBlockRequest] = None) -> Dict[str, Any]:
+    """Approve a pending threat block rule."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    try:
+        dur = req.duration_seconds if req else None
+        rule = service.approve_block(rule_id, duration_seconds=dur, user="api_operator")
+        if not rule.verified or rule.status.value == "failed":
+            raise HTTPException(status_code=500, detail=rule.error_message or "Failed to verify rule in firewall")
+        return rule.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Rule ID '{rule_id}' not found")
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+
+
+@app.post("/api/prevention/rules/{rule_id}/revoke", dependencies=[Depends(verify_access_pin)])
+async def revoke_block_endpoint(rule_id: str, req: Optional[RevokeBlockRequest] = None) -> Dict[str, Any]:
+    """Revoke an active or pending threat block rule."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    try:
+        reason = req.reason if req and req.reason else "Operator revoked"
+        rule = service.revoke_block(rule_id, reason=reason, user="api_operator")
+        return rule.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Rule ID '{rule_id}' not found")
+
+
+@app.get("/api/prevention/audit", dependencies=[Depends(verify_access_pin)])
+async def get_prevention_audit_endpoint(
+    limit: int = Query(100, ge=1, le=500),
+) -> Dict[str, Any]:
+    """Retrieve audit log of prevention events and safety decisions."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    logs = service.store.get_audit_log(limit=limit)
+    return {"audit_log": [entry.to_dict() for entry in logs]}
+
+
 @app.websocket("/api/live/ws")
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
@@ -1153,6 +1312,9 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
     await websocket.accept()
     service = get_live_service()
+    from beacon.prevention import get_prevention_service
+    prev_service = get_prevention_service()
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
@@ -1163,6 +1325,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
             pass
 
     service.subscribe(on_broadcast)
+    prev_service.subscribe(on_broadcast)
 
     async def sender_task() -> None:
         last_telemetry_time = time.time()
@@ -1214,6 +1377,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
         sender.cancel()
         receiver.cancel()
         service.unsubscribe(on_broadcast)
+        prev_service.unsubscribe(on_broadcast)
 
 
 # Mount pre-built React frontend if present (Production single-process deployment)

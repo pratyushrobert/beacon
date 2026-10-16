@@ -719,6 +719,16 @@ class LiveCaptureService:
                 logger.warning(f"[BEACON LIVE ALERT] {finding.title} -> Preserved Incident {incident.id}")
                 self._broadcast({"type": "incident", "data": incident.to_dict()})
 
+                # 10. Evaluate against threat prevention policy (live context only)
+                try:
+                    from beacon.prevention import get_prevention_service
+                    prev_service = get_prevention_service()
+                    rule = prev_service.evaluate_finding(finding, is_live=True)
+                    if rule:
+                        self._broadcast({"type": "prevention_rule", "data": rule.to_dict()})
+                except Exception as prev_err:
+                    logger.error(f"Error evaluating prevention policy: {prev_err}")
+
 
     def ingest_synthetic_packet(self, packet: RollingPacket) -> List[IncidentEvidence]:
         """

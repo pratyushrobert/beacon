@@ -1322,6 +1322,231 @@ def serve(
     uvicorn.run("beacon.api.server:app", host=host, port=port, reload=reload)
 
 
+# -------------------------------------------------------------------------
+# Threat Prevention CLI Subcommand Group
+# -------------------------------------------------------------------------
+
+prevention_app = typer.Typer(
+    name="prevention",
+    help="Beacon Prevention - Safe, modular threat blocking and firewall control",
+    no_args_is_help=True,
+)
+app.add_typer(prevention_app, name="prevention")
+
+
+@prevention_app.command("status")
+def prevention_status() -> None:
+    """Show threat prevention policy, active adapter, and enforcement statistics."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    status = service.get_status()
+
+    mode_color = "green" if status["mode"] == "auto" else ("yellow" if status["mode"] == "ask" else "dim")
+    auto_color = "bold green" if status["auto_protect_enabled"] else "bold red"
+    adapter_color = "green" if status["adapter_available"] else "red"
+
+    console.print()
+    console.print(Panel.fit(
+        f"[bold bright_cyan]BEACON THREAT PREVENTION ENGINE[/]\n\n"
+        f"  [bold white]Policy Mode:[/]          [{mode_color}]{status['mode'].upper()}[/] [dim](Default: MONITOR)[/]\n"
+        f"  [bold white]Auto Protection:[/]      [{auto_color}]{'ENABLED' if status['auto_protect_enabled'] else 'DISABLED'}[/]\n"
+        f"  [bold white]Firewall Adapter:[/]     [white]{status['adapter_name']}[/] ([{adapter_color}]{'Ready' if status['adapter_available'] else 'Unavailable'}[/])\n"
+        f"  [bold white]Active Rules:[/]         [cyan]{status['active_rule_count']}[/] / {status['max_active_rules']} max\n"
+        f"  [bold white]Default Expiry:[/]       [white]{status['default_duration_seconds']}s[/] (15 mins)\n"
+        f"  [dim]Adapter Status:[/]       [dim]{status['adapter_status_message']}[/]",
+        title="[bold white]Prevention Status[/]",
+        border_style="bright_blue",
+    ))
+    console.print()
+
+
+@prevention_app.command("list")
+def prevention_list(
+    status: str = typer.Option("all", "--status", "-s", help="Filter by rule status: all, active, pending_approval, expired, revoked"),
+) -> None:
+    """List threat prevention block rules."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    rules = service.store.list_rules(status=status if status != "all" else None)
+
+    if not rules:
+        console.print(f"[dim]No prevention rules found matching status '{status}'.[/]")
+        return
+
+    table = Table(
+        title=f"Beacon Threat Prevention Rules ({len(rules)} total)",
+        box=box.ROUNDED,
+        header_style="bold cyan",
+    )
+    table.add_column("Rule ID", style="bold white", width=12)
+    table.add_column("Destination IP", style="cyan", width=18)
+    table.add_column("Status", width=16)
+    table.add_column("Remaining", width=12)
+    table.add_column("Finding Title", style="white")
+    table.add_column("Severity", width=10)
+    table.add_column("Verified", width=10)
+
+    for r in rules:
+        status_color = "green" if r.status.value == "active" else ("yellow" if r.status.value == "pending_approval" else "dim")
+        rem_str = f"{int(r.remaining_seconds)}s" if r.is_active else "-"
+        verified_str = "[green]✓ Yes[/]" if r.verified else "[dim]No[/]"
+
+        table.add_row(
+            r.id,
+            r.destination_ip,
+            f"[{status_color}]{r.status.value.upper()}[/]",
+            rem_str,
+            r.finding_title[:40],
+            r.severity.upper(),
+            verified_str,
+        )
+
+    console.print(table)
+
+
+@prevention_app.command("block")
+def prevention_block(
+    destination_ip: str = typer.Argument(..., help="Suspicious destination IP address to block"),
+    duration: int = typer.Option(900, "--duration", "-d", help="Block duration in seconds (default: 900s / 15m)"),
+    reason: str = typer.Option("Manual CLI block", "--reason", "-r", help="Reason for enforcement action"),
+) -> None:
+    """Manually apply an egress drop rule targeting a suspicious destination IP."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+
+    try:
+        rule = service.manual_block(
+            destination_ip=destination_ip,
+            duration_seconds=duration,
+            reason=reason,
+            user="cli_user",
+        )
+        if rule.status.value == "active" and rule.verified:
+            console.print(f"[bold green]✓ Block rule active:[/] Egress to [cyan]{destination_ip}[/] dropped for [white]{rule.duration_seconds}s[/]. (Rule ID: [white]{rule.id}[/])")
+            if rule.collateral_warning:
+                console.print(f"[yellow bold]⚠ Notice:[/] [yellow]{rule.collateral_warning}[/]")
+        else:
+            console.print(f"[bold red]✗ Failed to block {destination_ip}:[/] {rule.error_message}")
+            raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[bold red]✗ Block rejected:[/] {str(e)}")
+        raise typer.Exit(code=1)
+
+
+@prevention_app.command("approve")
+def prevention_approve(
+    rule_id: str = typer.Argument(..., help="Rule ID of the pending threat block to approve"),
+    duration: Optional[int] = typer.Option(None, "--duration", "-d", help="Override duration in seconds"),
+) -> None:
+    """Approve a pending block proposal."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+
+    try:
+        rule = service.approve_block(rule_id=rule_id, duration_seconds=duration, user="cli_user")
+        if rule.status.value == "active" and rule.verified:
+            console.print(f"[bold green]✓ Rule {rule_id} approved & active:[/] [cyan]{rule.destination_ip}[/] blocked for [white]{rule.duration_seconds}s[/].")
+            if rule.collateral_warning:
+                console.print(f"[yellow bold]⚠ Notice:[/] [yellow]{rule.collateral_warning}[/]")
+        else:
+            console.print(f"[bold red]✗ Failed to approve {rule_id}:[/] {rule.error_message}")
+            raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[bold red]✗ Approval error:[/] {str(e)}")
+        raise typer.Exit(code=1)
+
+
+@prevention_app.command("revoke")
+def prevention_revoke(
+    rule_id: str = typer.Argument(..., help="Rule ID to revoke and unblock"),
+    reason: str = typer.Option("Manual CLI revocation", "--reason", "-r", help="Reason for revocation"),
+) -> None:
+    """Revoke and remove an active or pending block rule."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+
+    try:
+        rule = service.revoke_block(rule_id=rule_id, reason=reason, user="cli_user")
+        console.print(f"[bold green]✓ Rule {rule_id} revoked:[/] Unblocked [cyan]{rule.destination_ip}[/].")
+    except Exception as e:
+        console.print(f"[bold red]✗ Revocation error:[/] {str(e)}")
+        raise typer.Exit(code=1)
+
+
+@prevention_app.command("policy")
+def prevention_policy(
+    mode: Optional[str] = typer.Option(None, "--mode", "-m", help="Policy mode: monitor, ask, auto"),
+    auto_protect: Optional[bool] = typer.Option(None, "--auto-protect/--no-auto-protect", help="Enable/disable autonomous protection"),
+    duration: Optional[int] = typer.Option(None, "--duration", "-d", help="Default block duration in seconds"),
+) -> None:
+    """Inspect or update the threat prevention policy."""
+    from beacon.prevention import EnforcementMode, get_prevention_service
+    service = get_prevention_service()
+    pol = service.policy
+
+    if mode or auto_protect is not None or duration:
+        if mode:
+            try:
+                pol.mode = EnforcementMode(mode.lower())
+            except ValueError:
+                console.print(f"[bold red]✗ Invalid mode '{mode}'. Choose 'monitor', 'ask', or 'auto'.[/]")
+                raise typer.Exit(code=1)
+        if auto_protect is not None:
+            pol.auto_protect_enabled = auto_protect
+        if duration:
+            pol.default_duration_seconds = max(10, min(duration, pol.max_duration_seconds))
+
+        service.update_policy(pol)
+        console.print(f"[bold green]✓ Updated threat prevention policy.[/]")
+
+    console.print(f"Current Policy:")
+    console.print(f"  Mode:            [bold white]{pol.mode.value}[/]")
+    console.print(f"  Auto Protection: [bold white]{'ENABLED' if pol.auto_protect_enabled else 'DISABLED'}[/]")
+    console.print(f"  Default Expiry:  [bold white]{pol.default_duration_seconds}s[/]")
+    console.print(f"  Max Duration:    [bold white]{pol.max_duration_seconds}s[/]")
+    console.print(f"  Max Rules:       [bold white]{pol.max_active_rules}[/]")
+
+
+@prevention_app.command("audit")
+def prevention_audit(
+    limit: int = typer.Option(25, "--limit", "-n", help="Number of recent audit events to display"),
+) -> None:
+    """View the audit log of threat prevention actions and safety decisions."""
+    from beacon.prevention import get_prevention_service
+    service = get_prevention_service()
+    logs = service.store.get_audit_log(limit=limit)
+
+    if not logs:
+        console.print("[dim]No audit log records recorded yet.[/]")
+        return
+
+    table = Table(
+        title=f"Beacon Prevention Audit Trail (Recent {len(logs)})",
+        box=box.ROUNDED,
+        header_style="bold cyan",
+    )
+    table.add_column("Timestamp", style="dim", width=20)
+    table.add_column("Action", style="bold white", width=18)
+    table.add_column("Target IP", style="cyan", width=18)
+    table.add_column("Details", style="white")
+    table.add_column("User", style="dim", width=12)
+
+    for entry in logs:
+        from datetime import datetime, timezone
+        ts_str = datetime.fromtimestamp(entry.timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        act_color = "green" if entry.action in ("APPLIED", "APPROVED") else ("red" if "FAIL" in entry.action or "REJECT" in entry.action else "yellow")
+
+        table.add_row(
+            ts_str,
+            f"[{act_color}]{entry.action}[/]",
+            entry.destination_ip or "-",
+            entry.details,
+            entry.user,
+        )
+
+    console.print(table)
+
+
 def cli_main() -> None:
     app()
 

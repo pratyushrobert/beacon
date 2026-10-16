@@ -9,8 +9,9 @@
 
 ### 1. Install Python Dependencies
 ```bash
-cd D:\Project\Becon-claude
+# From project repository root
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 2. Install Node.js Dependencies
@@ -21,8 +22,7 @@ npm install
 
 ### 3. Start the Backend API
 ```bash
-# From project root
-cd D:\Project\Becon-claude
+# In your first terminal (from project root)
 python -m uvicorn beacon.api.server:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -30,7 +30,8 @@ The API will be available at http://localhost:8000
 
 ### 4. Start the Frontend (in a new terminal)
 ```bash
-cd D:\Project\Becon-claude\web
+# In your second terminal
+cd web
 npm run dev
 ```
 

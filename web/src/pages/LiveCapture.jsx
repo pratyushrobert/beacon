@@ -35,9 +35,11 @@ import {
   Network,
   History,
   Compass,
-  Package
+  Package,
+  ShieldAlert,
 } from 'lucide-react'
 import { useMode } from '../context/ModeContext'
+import PreventionPanel from '../components/PreventionPanel'
 
 export default function LiveCapture() {
   const { mode, isFreeBird, isBlue, isRed } = useMode()
@@ -67,7 +69,7 @@ export default function LiveCapture() {
   const [pinnedOnly, setPinnedOnly] = useState(false)
 
   // Active view tab
-  const [activeTab, setActiveTab] = useState('monitor') // 'monitor' | 'incidents'
+  const [activeTab, setActiveTab] = useState('monitor') // 'monitor' | 'incidents' | 'prevention'
 
   // Inline Note Editor State
   const [editingNoteId, setEditingNoteId] = useState(null)
@@ -637,6 +639,17 @@ export default function LiveCapture() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setActiveTab('prevention')}
+                className={`px-3 py-1 rounded text-xs font-medium flex items-center gap-1.5 transition-all ${
+                  activeTab === 'prevention'
+                    ? 'bg-dark-800 text-white shadow-sm'
+                    : 'text-dark-400 hover:text-dark-200'
+                }`}
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                <span>Threat Prevention</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1201,7 +1214,7 @@ export default function LiveCapture() {
               </div>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'incidents' ? (
           /* TAB 2: PRESERVED INCIDENTS & EVIDENCE CENTER */
           <div className="flex-1 flex overflow-hidden">
             {/* Incidents List (Left 1/2) */}
@@ -1507,6 +1520,8 @@ export default function LiveCapture() {
               )}
             </div>
           </div>
+        ) : (
+          <PreventionPanel />
         )}
       </main>
     </div>
