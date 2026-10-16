@@ -78,9 +78,15 @@ class RollingPacket:
             return f"{first_str}<->{second_str}({proto})"
         return f"{first_ip}<->{second_ip}"
 
+    @property
+    def is_reconstructed(self) -> bool:
+        """Indicates whether this packet frame was reconstructed rather than preserved verbatim from the wire."""
+        return not bool(self.raw_hex)
+
     def to_dict(self, include_raw: bool = False) -> Dict[str, Any]:
         data = asdict(self)
         data["conversation_key"] = self.conversation_key
+        data["is_reconstructed"] = self.is_reconstructed
         if not include_raw:
             data.pop("raw_hex", None)
         return data

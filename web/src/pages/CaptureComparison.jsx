@@ -38,6 +38,7 @@ export default function CaptureComparison() {
   useEffect(() => {
     if (baselineId === 'live' || targetId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         if (baselineId && targetId && baselineId !== targetId) {
           runComparison(true)
         }

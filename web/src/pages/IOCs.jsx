@@ -29,6 +29,7 @@ export default function IOCs() {
     loadIOCs(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadIOCs(true)
       }, 2500)
       return () => clearInterval(interval)

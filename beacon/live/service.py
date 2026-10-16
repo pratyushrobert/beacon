@@ -7,9 +7,12 @@ import ctypes
 import ipaddress
 import json
 import logging
+import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -35,33 +38,48 @@ logger = logging.getLogger(__name__)
 
 
 def get_current_process_memory_mb() -> float:
-    """Return the RSS memory usage of the current process in MB."""
-    try:
-        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("cb", ctypes.c_ulong),
-                ("PageFaultCount", ctypes.c_ulong),
-                ("PeakWorkingSetSize", ctypes.c_size_t),
-                ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                ("PagefileUsage", ctypes.c_size_t),
-                ("PeakPagefileUsage", ctypes.c_size_t),
-            ]
+    """Return the RSS memory usage of the current process in MB across Linux and Windows."""
+    # 1. Linux procfs check (zero-dependency, reads current resident memory in pages)
+    if sys.platform != "win32":
+        try:
+            with open("/proc/self/statm", "r") as f:
+                fields = f.read().split()
+                if len(fields) >= 2:
+                    rss_pages = int(fields[1])
+                    page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+                    return round((rss_pages * page_size) / (1024 * 1024), 2)
+        except Exception:
+            pass
 
-        counters = PROCESS_MEMORY_COUNTERS()
-        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        fn = ctypes.windll.psapi.GetProcessMemoryInfo
-        fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), ctypes.c_ulong]
-        fn.restype = ctypes.c_int
-        if fn(handle, ctypes.byref(counters), counters.cb):
-            return round(counters.WorkingSetSize / (1024 * 1024), 2)
-    except Exception:
-        pass
+    # 2. Windows Win32 API check
+    if sys.platform == "win32":
+        try:
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
 
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            fn = ctypes.windll.psapi.GetProcessMemoryInfo
+            fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), ctypes.c_ulong]
+            fn.restype = ctypes.c_int
+            if fn(handle, ctypes.byref(counters), counters.cb):
+                return round(counters.WorkingSetSize / (1024 * 1024), 2)
+        except Exception:
+            pass
+
+    # 3. POSIX resource fallback
     try:
         import resource
         return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 2)
@@ -75,14 +93,28 @@ class LiveCaptureService:
     incremental statistics, streaming detection, and evidence retention.
     """
 
-    def __init__(self, buffer_capacity: int = 1000):
+    def __init__(self, buffer_capacity: Optional[int] = None):
+        is_low_res = os.environ.get("BEACON_LOW_RESOURCE", "0") in ("1", "true", "True")
+        if buffer_capacity is None:
+            env_cap = os.environ.get("BEACON_BUFFER_CAPACITY")
+            if env_cap and env_cap.isdigit():
+                buffer_capacity = int(env_cap)
+            else:
+                buffer_capacity = 500 if is_low_res else 1000
+
+        self.is_low_resource = is_low_res
         self.status = LiveCaptureStatus.STOPPED
         self.selected_interface: Optional[str] = None
         self.capture_filter: Optional[str] = None
         self.mode = "white"
 
         self.buffer = RollingPacketBuffer(capacity=buffer_capacity)
-        self.evidence_store = SmartEvidenceStore()
+        max_incidents = 40 if is_low_res else 100
+        max_pkts_per_incident = 60 if is_low_res else 200
+        self.evidence_store = SmartEvidenceStore(
+            max_incidents=max_incidents,
+            max_packets_per_incident=max_pkts_per_incident,
+        )
         self.detection_engine = StreamingDetectionEngine(mode=self.mode)
 
         self._process: Optional[subprocess.Popen] = None
@@ -97,6 +129,11 @@ class LiveCaptureService:
         self.total_bytes = 0
         self.dropped_packets = 0
         self.error_message: Optional[str] = None
+
+        # Maximum capacity bounds to prevent unbounded memory growth during 24/7 continuous runs
+        self._max_conversations = 2500 if is_low_res else 5000
+        self._max_hosts = 1000 if is_low_res else 2500
+        self._max_iocs = 500 if is_low_res else 1000
 
         # Rate tracking sliding windows (timestamp, count/bytes)
         self._rate_window_packets: collections.deque[Tuple[float, int]] = collections.deque(maxlen=100)
@@ -134,7 +171,7 @@ class LiveCaptureService:
                 "last_seen": None,
             }
         )
-        self._timeline_events: collections.deque[Dict[str, Any]] = collections.deque(maxlen=500)
+        self._timeline_events: collections.deque[Dict[str, Any]] = collections.deque(maxlen=300 if is_low_res else 500)
         self._extracted_iocs: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
         # Broadcast callbacks (WebSocket / SSE subscribers)
@@ -255,7 +292,7 @@ class LiveCaptureService:
             return True
 
     def stop_capture(self) -> bool:
-        """Stop running continuous capture and terminate background process."""
+        """Stop running continuous capture and terminate background process tree."""
         with self._lock:
             if self.status == LiveCaptureStatus.STOPPED:
                 return True
@@ -263,11 +300,22 @@ class LiveCaptureService:
             self._stop_event.set()
             if self._process and self._process.poll() is None:
                 try:
-                    self._process.terminate()
-                    try:
-                        self._process.wait(timeout=2.0)
-                    except subprocess.TimeoutExpired:
-                        self._process.kill()
+                    if sys.platform != "win32":
+                        try:
+                            pgid = os.getpgid(self._process.pid)
+                            os.killpg(pgid, signal.SIGTERM)
+                            self._process.wait(timeout=2.0)
+                        except (subprocess.TimeoutExpired, ProcessLookupError):
+                            try:
+                                os.killpg(pgid, signal.SIGKILL)
+                            except Exception:
+                                pass
+                    else:
+                        self._process.terminate()
+                        try:
+                            self._process.wait(timeout=2.0)
+                        except subprocess.TimeoutExpired:
+                            self._process.kill()
                 except Exception as e:
                     logger.debug(f"Process termination note: {e}")
 
@@ -277,6 +325,8 @@ class LiveCaptureService:
             # Finalize any ongoing evidence collection windows
             self.evidence_store.finalize_expired_windows()
             logger.info("Live capture stopped cleanly.")
+            import gc
+            gc.collect()
             return True
 
     def pause_analysis(self) -> None:
@@ -314,14 +364,17 @@ class LiveCaptureService:
 
         logger.info(f"Starting TShark live capture: {' '.join(cmd)}")
 
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "bufsize": 1,  # Line-buffered
+        }
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True
+
         try:
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,  # Line-buffered
-            )
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
             self.status = LiveCaptureStatus.CAPTURING
         except Exception as e:
             self.status = LiveCaptureStatus.ERROR
@@ -393,7 +446,24 @@ class LiveCaptureService:
                 self.status = LiveCaptureStatus.ERROR
                 self.error_message = str(e)
         finally:
-            if self.status != LiveCaptureStatus.ERROR:
+            if self._process and self._process.poll() is not None and self._process.returncode != 0 and packet_seq == 0 and not self._stop_event.is_set():
+                err_text = ""
+                try:
+                    if self._process.stderr:
+                        err_text = self._process.stderr.read().strip()
+                except Exception:
+                    pass
+                self.status = LiveCaptureStatus.ERROR
+                if "permission" in err_text.lower() or "dumpcap" in err_text.lower():
+                    self.error_message = (
+                        f"Packet capture permission denied. On Debian/antiX Linux, add your user to the 'wireshark' group "
+                        f"('sudo usermod -aG wireshark $USER') and configure dumpcap ('sudo dpkg-reconfigure wireshark-common'). "
+                        f"Detail: {err_text}"
+                    )
+                else:
+                    self.error_message = f"TShark capture exited with code {self._process.returncode}: {err_text}"
+                logger.error(self.error_message)
+            elif self.status != LiveCaptureStatus.ERROR:
                 self.status = LiveCaptureStatus.STOPPED
 
     def _add_timeline_event(
@@ -436,6 +506,9 @@ class LiveCaptureService:
 
         # 3. Update host metrics
         if packet.ip_src:
+            if len(self._host_stats) >= self._max_hosts and packet.ip_src not in self._host_stats:
+                oldest_ip = min(self._host_stats.keys(), key=lambda k: self._host_stats[k].get("last_seen") or 0)
+                del self._host_stats[oldest_ip]
             h_src = self._host_stats[packet.ip_src]
             h_src["packets_sent"] += 1
             h_src["bytes_sent"] += packet.length
@@ -452,9 +525,14 @@ class LiveCaptureService:
             if packet.app_proto or packet.transport_proto:
                 h_src["protocols"].add(packet.app_proto or packet.transport_proto)
             if packet.src_port:
-                h_src.setdefault("ports_used", set()).add(packet.src_port)
+                ports = h_src.setdefault("ports_used", set())
+                if len(ports) < 40:
+                    ports.add(packet.src_port)
 
         if packet.ip_dst:
+            if len(self._host_stats) >= self._max_hosts and packet.ip_dst not in self._host_stats:
+                oldest_ip = min(self._host_stats.keys(), key=lambda k: self._host_stats[k].get("last_seen") or 0)
+                del self._host_stats[oldest_ip]
             h_dst = self._host_stats[packet.ip_dst]
             h_dst["packets_recv"] += 1
             h_dst["bytes_recv"] += packet.length
@@ -471,7 +549,9 @@ class LiveCaptureService:
             if packet.app_proto or packet.transport_proto:
                 h_dst["protocols"].add(packet.app_proto or packet.transport_proto)
             if packet.dst_port:
-                h_dst.setdefault("ports_used", set()).add(packet.dst_port)
+                ports = h_dst.setdefault("ports_used", set())
+                if len(ports) < 40:
+                    ports.add(packet.dst_port)
 
         # 4. Update protocol metrics
         proto_label = (packet.app_proto or packet.transport_proto or "other").upper()
@@ -480,6 +560,9 @@ class LiveCaptureService:
         # 5. Update conversation metrics
         c_key = packet.conversation_key
         if c_key != "unknown":
+            if len(self._conversation_counts) >= self._max_conversations and c_key not in self._conversation_counts:
+                oldest_c = min(self._conversation_counts.keys(), key=lambda k: self._conversation_counts[k].get("last_seen") or 0)
+                del self._conversation_counts[oldest_c]
             conv = self._conversation_counts[c_key]
             conv["key"] = c_key
             if not conv["host1"]:
@@ -498,6 +581,9 @@ class LiveCaptureService:
             dom = packet.dns_query_name.strip()
             if dom:
                 ioc_k = ("domain", dom)
+                if ioc_k not in self._extracted_iocs and len(self._extracted_iocs) >= self._max_iocs:
+                    oldest_ioc = min(self._extracted_iocs.keys(), key=lambda k: self._extracted_iocs[k].get("last_seen") or 0)
+                    del self._extracted_iocs[oldest_ioc]
                 if ioc_k not in self._extracted_iocs:
                     self._extracted_iocs[ioc_k] = {
                         "type": "domain",
@@ -515,6 +601,9 @@ class LiveCaptureService:
             sni = packet.tls_server_name.strip()
             if sni:
                 ioc_k = ("domain", sni)
+                if ioc_k not in self._extracted_iocs and len(self._extracted_iocs) >= self._max_iocs:
+                    oldest_ioc = min(self._extracted_iocs.keys(), key=lambda k: self._extracted_iocs[k].get("last_seen") or 0)
+                    del self._extracted_iocs[oldest_ioc]
                 if ioc_k not in self._extracted_iocs:
                     self._extracted_iocs[ioc_k] = {
                         "type": "domain",
@@ -1030,60 +1119,54 @@ class LiveCaptureService:
         }
 
     def get_network_graph(self, max_nodes: int = 40) -> Dict[str, Any]:
-        """Generate network topology nodes and edges from live telemetry."""
+        """Generate network topology nodes, subnets, and edges from live telemetry."""
+        from beacon.analysis.topology import build_network_topology
+
         with self._lock:
             stats_copy = list(self._host_stats.items())
             convs_copy = list(self._conversation_counts.items())
             active_findings = [f.to_dict() for f in self.detection_engine.findings]
 
-        sorted_hosts = sorted(
-            stats_copy,
-            key=lambda x: (x[1]["bytes_sent"] + x[1]["bytes_recv"]),
-            reverse=True,
-        )[:max_nodes]
-
-        host_ips = {ip for ip, _ in sorted_hosts}
-        nodes = []
-        for ip, s in sorted_hosts:
-            host_findings = [f for f in active_findings if f.get("source_ip") == ip or f.get("destination_ip") == ip]
-            max_severity = "info"
-            for sev in ["critical", "high", "medium", "low"]:
-                if any(f.get("severity") == sev for f in host_findings):
-                    max_severity = sev
-                    break
-
-            nodes.append({
-                "id": ip,
-                "label": ip,
+        hosts_data = []
+        ports_map = {}
+        for ip, s in stats_copy:
+            hosts_data.append({
+                "ip": ip,
+                "packets_sent": s.get("packets_sent", 0),
+                "packets_received": s.get("packets_recv", 0),
+                "bytes_sent": s.get("bytes_sent", 0),
+                "bytes_received": s.get("bytes_recv", 0),
+                "first_seen": s.get("first_seen"),
+                "last_seen": s.get("last_seen"),
                 "is_internal": s.get("is_internal", False),
-                "is_multicast": s.get("is_multicast", False),
-                "is_ipv6": s.get("is_ipv6", False),
-                "packets_sent": s["packets_sent"],
-                "packets_received": s["packets_recv"],
-                "total_bytes": s["bytes_sent"] + s["bytes_recv"],
-                "findings_count": len(host_findings),
-                "severity": max_severity,
+            })
+            if s.get("ports_used"):
+                ports_map[ip] = set(s["ports_used"])
+
+        convs_data = []
+        for key, c in convs_copy:
+            convs_data.append({
+                "conversation_key": key,
+                "host1": c.get("host1"),
+                "host2": c.get("host2"),
+                "port1": c.get("port1"),
+                "port2": c.get("port2"),
+                "protocol": c.get("protocol"),
+                "packet_count": c.get("packets", 0),
+                "byte_count": c.get("bytes", 0),
+                "first_seen": c.get("first_seen"),
+                "last_seen": c.get("last_seen"),
             })
 
-        edges = []
-        for key, c in sorted(convs_copy, key=lambda x: x[1]["bytes"], reverse=True)[:100]:
-            h1 = c["host1"]
-            h2 = c["host2"]
-            if h1 in host_ips and h2 in host_ips:
-                edges.append({
-                    "id": key,
-                    "source": h1,
-                    "target": h2,
-                    "protocol": c["protocol"] or "unknown",
-                    "packet_count": c["packets"],
-                    "byte_count": c["bytes"],
-                    "port1": c["port1"],
-                    "port2": c["port2"],
-                    "first_seen": c["first_seen"],
-                    "last_seen": c["last_seen"],
-                })
-
-        return {"nodes": nodes, "edges": edges, "is_live": True}
+        topo = build_network_topology(
+            hosts_data=hosts_data,
+            conversations_data=convs_data,
+            findings_data=active_findings,
+            ports_by_ip=ports_map,
+            max_nodes=max_nodes,
+        )
+        topo["is_live"] = True
+        return topo
 
     def get_evidence_graph(
         self,
@@ -1091,6 +1174,8 @@ class LiveCaptureService:
         findings: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Generate multi-entity investigation graph (hosts, domains, findings)."""
+        from beacon.analysis.topology import classify_ip_address, infer_device_role
+
         with self._lock:
             stats_copy = list(self._host_stats.items())
             convs_copy = list(self._conversation_counts.items())
@@ -1107,6 +1192,7 @@ class LiveCaptureService:
         host_ips = set()
         for ip, s in sorted_hosts:
             host_ips.add(ip)
+            c = classify_ip_address(ip)
             h_findings = [f for f in active_findings if f.get("source_ip") == ip or f.get("destination_ip") == ip]
             max_sev = "info"
             for sev in ["critical", "high", "medium", "low"]:
@@ -1114,13 +1200,25 @@ class LiveCaptureService:
                     max_sev = sev
                     break
 
+            role_name, role_badge, role_evidence = infer_device_role(ip, c, s.get("ports_used", []))
+
             nodes.append({
                 "id": ip,
                 "label": ip,
                 "type": "host",
-                "is_internal": s.get("is_internal", False),
-                "is_multicast": s.get("is_multicast", False),
-                "is_ipv6": s.get("is_ipv6", False),
+                "ip": ip,
+                "ip_version": c["ip_version"],
+                "subnet": c["subnet_id"],
+                "subnet_label": c["subnet_label"],
+                "subnet_category": c["category"],
+                "device_role": role_name,
+                "role_badge": role_badge,
+                "role_evidence": role_evidence,
+                "is_internal": c["is_internal"],
+                "is_multicast": c["is_multicast"],
+                "is_loopback": c["is_loopback"],
+                "is_link_local": c["is_link_local"],
+                "is_ipv6": c["ip_version"] == 6,
                 "packets_sent": s["packets_sent"],
                 "packets_received": s["packets_recv"],
                 "total_bytes": s["bytes_sent"] + s["bytes_recv"],

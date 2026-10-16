@@ -57,6 +57,7 @@ export default function PacketExplorer() {
     loadPackets(false)
     if (analysisId === 'live' && offset === 0 && !searchQuery && !selectedIp) {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadPackets(true)
       }, 2500)
       return () => clearInterval(interval)
@@ -338,15 +339,24 @@ export default function PacketExplorer() {
           </div>
         </div>
 
-        {/* Right: Deep Packet Inspection Panel */}
+        {/* Right: Deep Packet Inspection Panel (Full-screen sheet on mobile, sidebar on desktop) */}
         {selectedPacketNumber && (
-          <div className="w-[500px] border-l border-dark-200 dark:border-dark-800 bg-white dark:bg-dark-900 flex flex-col h-[calc(100vh-57px)] overflow-hidden shadow-xl z-20">
+          <div className="fixed inset-0 z-50 lg:static lg:inset-auto lg:z-20 w-full lg:w-[480px] xl:w-[520px] border-l border-dark-200 dark:border-dark-800 bg-white dark:bg-dark-900 flex flex-col h-full lg:h-[calc(100vh-57px)] overflow-hidden shadow-2xl">
             {/* Inspector Header */}
-            <div className="p-4 border-b border-dark-200 dark:border-dark-800 bg-dark-50 dark:bg-dark-800/50 flex flex-col gap-3">
+            <div className="p-3 sm:p-4 border-b border-dark-200 dark:border-dark-800 bg-dark-50 dark:bg-dark-800/50 flex flex-col gap-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-primary-500" />
-                  <h2 className="font-semibold text-sm text-dark-900 dark:text-white">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPacketNumber(null)}
+                    className="lg:hidden p-1.5 -ml-1 text-dark-400 hover:text-white rounded flex items-center gap-1 text-xs font-mono min-h-[38px] min-w-[38px]"
+                    title="Return to packet list"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Back</span>
+                  </button>
+                  <Layers className="w-5 h-5 text-primary-500 hidden sm:block" />
+                  <h2 className="font-semibold text-sm text-dark-900 dark:text-white truncate">
                     Packet #{selectedPacketNumber} Inspection
                   </h2>
                 </div>
@@ -354,23 +364,24 @@ export default function PacketExplorer() {
                   {packetDetail?.conversation_key && (
                     <button
                       onClick={() => openStreamViewer(packetDetail.conversation_key)}
-                      className="px-2.5 py-1 rounded bg-primary-600 text-white text-xs font-medium flex items-center gap-1 shadow-sm hover:bg-primary-700 transition-colors"
+                      className="px-2.5 py-1.5 rounded bg-primary-600 text-white text-xs font-medium flex items-center gap-1 shadow-sm hover:bg-primary-700 transition-colors min-h-[36px]"
                       title="Follow reconstructed conversation stream"
                     >
-                      <MessageSquare className="w-3 h-3" />
-                      <span>Follow Stream</span>
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Follow Stream</span>
                     </button>
                   )}
                   <button
                     onClick={() => setShowRawJson(!showRawJson)}
-                    className="p-1.5 text-dark-400 hover:text-dark-200 rounded"
+                    className="p-2 text-dark-400 hover:text-dark-200 rounded min-h-[38px] min-w-[38px] flex items-center justify-center"
                     title="Toggle Raw JSON"
                   >
                     <Code className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => setSelectedPacketNumber(null)}
-                    className="p-1.5 text-dark-400 hover:text-dark-200 rounded"
+                    className="p-2 text-dark-400 hover:text-dark-200 rounded min-h-[38px] min-w-[38px] flex items-center justify-center"
+                    title="Close Inspector"
                   >
                     <X className="w-4 h-4" />
                   </button>

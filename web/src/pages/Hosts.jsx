@@ -37,6 +37,7 @@ export default function Hosts() {
     loadHosts(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadHosts(true)
       }, 2500)
       return () => clearInterval(interval)

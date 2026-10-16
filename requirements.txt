@@ -1,38 +1,40 @@
 # Core Dependencies
-typer[all]==0.12.3          # CLI framework with rich formatting
-rich==13.7.1                # Terminal formatting and progress
-pydantic==2.8.2            # Data validation and settings
-pydantic-settings==2.4.0   # Settings management
+typer>=0.12.0               # CLI framework
+click>=8.0.0                # Click base dependency for Typer
+rich>=13.7.0                # Terminal formatting and progress
+pydantic>=2.8.0             # Data validation and settings
+pydantic-settings>=2.4.0    # Settings management
 
 # Network Analysis
-pyshark==0.6               # Python wrapper for TShark
-scapy==2.5.0              # Packet manipulation (fallback/supplementary)
+pyshark>=0.6                # Python wrapper for TShark
+scapy>=2.5.0                # Packet manipulation (fallback/supplementary)
 
 # Data Processing
-pandas==2.2.2              # Data analysis and manipulation
-numpy==1.26.4             # Numerical computing
+pandas>=2.2.0               # Data analysis and manipulation (2.2.3+ for Python 3.13)
+numpy>=1.26.0               # Numerical computing (2.1+ wheels available for Python 3.13)
 
 # Storage
-sqlite-utils==3.36        # SQLite database utilities
+sqlite-utils>=3.36         # SQLite database utilities
 
 # Utilities
-python-dateutil==2.9.0    # Date/time parsing
-tqdm==4.66.4              # Progress bars
-jsonschema==4.23.0        # JSON schema validation
-pyyaml==6.0.1             # YAML parsing for rules
+python-dateutil>=2.9.0     # Date/time parsing
+tqdm>=4.66.0               # Progress bars
+jsonschema>=4.23.0         # JSON schema validation
+pyyaml>=6.0.0              # YAML parsing for rules
 
 # Export/Reporting
-jinja2==3.1.4             # Template engine for reports
-markdown==3.6             # Markdown to HTML
-weasyprint==62.3          # HTML to PDF (requires system deps)
+jinja2>=3.1.0              # Template engine for reports
+markdown>=3.6              # Markdown support
+# weasyprint>=62.0          # Optional: HTML to PDF (requires system pango/cairo deps)
 
-# Future GUI (FastAPI backend option)
-# fastapi==0.111.0
-# uvicorn[standard]==0.30.1
+# Web GUI & API Server
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
 
 # Development
-pytest==8.2.2
-pytest-cov==5.0.0
-black==24.4.2
-ruff==0.5.0
-mypy==1.10.1
+pytest>=8.2.0
+pytest-cov>=5.0.0
+black>=24.4.0
+ruff>=0.5.0
+mypy>=1.10.0

@@ -1,13 +1,15 @@
-# Python
+# =========================================================================
+# Beacon — Cybersecurity Network Traffic Investigation Platform
+# Git Ignore Configuration
+# =========================================================================
+
+# --- Python & Bytecode ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-build/
 develop-eggs/
-dist/
-downloads/
 eggs/
 .eggs/
 lib/
@@ -20,53 +22,89 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# --- Virtual Environments ---
+.venv/
 venv/
 env/
 ENV/
+ENV*/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Testing
+# --- Testing & Code Quality ---
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
 *.cover
 .hypothesis/
 
-# Beacon specific
-*.pcap
-*.pcapng
-*.cap
-cache/
-temp/
-output/
-reports/*.pdf
-reports/*.html
+# --- Build & Distribution ---
+# Release binaries are distributed via GitHub Releases; keep intermediates and outputs untracked
+build/
+dist/
+
+# --- Secrets & Local Configuration ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+config.local.json
+
+# --- Frontend & Tooling ---
+node_modules/
+web/node_modules/
+web/dist/
+.npm/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- IDEs, Editors & OS Metadata ---
+.vscode/
+.idea/
+.kilo/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Logs & Temporary Directories ---
 logs/
 *.log
+tmp/
+temp/
+*.tmp
+output/
 
-# Keep example files
-!examples/*.pcap
-!examples/*.pcapng
-
-# Database
+# --- Local Databases & Transient Caches ---
+cache/
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
 
-# Reports (keep structure, ignore generated)
+# --- Captures & Packet Files ---
+# Ignore raw network captures by default to prevent leaking private packet traffic
+*.pcap
+*.pcapng
+*.cap
+/test.pcap
+
+# Explicitly track sanitized example fixtures required for tests & documentation
+!examples/*.pcap
+!examples/*.pcapng
+
+# --- Reports ---
+# Ignore generated incident exports while preserving report templates
 reports/generated/
-
-# Environment
-.env
-.env.local
-config.local.json
-.kilo
-node_modules
-test.pcap
+reports/*.pdf
+reports/*.html

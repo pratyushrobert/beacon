@@ -105,6 +105,7 @@ export default function MemoryView() {
   useEffect(() => {
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadMemoryData('live', true)
       }, 3500)
       return () => clearInterval(interval)

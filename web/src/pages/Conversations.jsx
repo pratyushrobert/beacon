@@ -24,6 +24,7 @@ export default function Conversations() {
     loadConversations(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadConversations(true)
       }, 2500)
       return () => clearInterval(interval)

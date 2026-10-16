@@ -26,6 +26,7 @@ export default function Timeline() {
     loadTimeline(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadTimeline(true)
       }, 2500)
       return () => clearInterval(interval)

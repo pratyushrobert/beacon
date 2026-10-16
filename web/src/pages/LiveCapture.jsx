@@ -114,7 +114,12 @@ export default function LiveCapture() {
     try {
       const loc = window.location
       const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${loc.hostname}:8000/api/live/ws`
+      const wsHost = (loc.port === '3000' || loc.port === '5173')
+        ? `${loc.hostname}:8000`
+        : loc.host
+      const pin = sessionStorage.getItem('beacon_pin')
+      const pinParam = pin ? `?pin=${encodeURIComponent(pin)}` : ''
+      const wsUrl = `${protocol}//${wsHost}/api/live/ws${pinParam}`
 
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
@@ -151,10 +156,10 @@ export default function LiveCapture() {
 
       ws.onclose = () => {
         setWsConnected(false)
-        // Auto-reconnect after 2 seconds
+        // Auto-reconnect after 2.5 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           connectWebSocket()
-        }, 2000)
+        }, 2500)
       }
 
       ws.onerror = () => {
@@ -169,10 +174,11 @@ export default function LiveCapture() {
   useEffect(() => {
     if (wsConnected) return
     const interval = setInterval(() => {
+      if (document.hidden) return
       fetchStatus()
       fetchRecentPackets()
       fetchIncidents()
-    }, 2000)
+    }, 2500)
     return () => clearInterval(interval)
   }, [wsConnected])
 

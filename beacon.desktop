@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Beacon
+GenericName=Cybersecurity Investigation Platform
+Comment=PCAP/PCAPNG network traffic analysis and live investigation platform
+Exec=bash -c "exec '$HOME/Projects/beacon/bin/beacon'"
+Icon=utilities-system-monitor
+Terminal=true
+Categories=Network;Security;System;
+Keywords=pcap;wireshark;network;security;tshark;traffic;
+StartupNotify=true
+Path=$HOME/Projects/beacon

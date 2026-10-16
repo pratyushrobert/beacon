@@ -55,9 +55,10 @@ class AnalysisEngine:
 
         # Setup cache
         if cache_dir is None:
-            cache_dir = Path("cache")
-        self.cache_dir = cache_dir
-        self.cache_dir.mkdir(exist_ok=True)
+            from beacon.utils.paths import get_beacon_cache_dir
+            cache_dir = get_beacon_cache_dir()
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Cache database path
         mtime = self.pcap_path.stat().st_mtime if self.pcap_path.exists() else 0
@@ -715,70 +716,59 @@ class AnalysisEngine:
         return [ioc.to_dict() for ioc in iocs]
 
     def get_network_graph(self, max_nodes: int = 50) -> Dict[str, Any]:
-        """Generate network topology graph nodes and edges for visualization."""
+        """Generate network topology graph nodes, subnets, and edges for visualization."""
+        from beacon.analysis.topology import build_network_topology
+
         cursor = self.db_conn.cursor()
         hosts_rows = cursor.execute(
             "SELECT * FROM hosts ORDER BY bytes_sent + bytes_received DESC LIMIT ?", (max_nodes,)
         ).fetchall()
 
+        hosts_data = [dict(row) for row in hosts_rows]
         host_ips = {row["ip"] for row in hosts_rows}
-        nodes = []
-        for row in hosts_rows:
-            ip = row["ip"]
-            is_mcast = False
-            is_v6 = False
-            try:
-                ip_obj = ip_address(ip)
-                is_mcast = ip_obj.is_multicast
-                is_v6 = ip_obj.version == 6
-            except ValueError:
-                pass
-
-            host_findings = [f.to_dict() for f in self.findings if f.source_ip == ip or f.destination_ip == ip]
-            max_severity = "info"
-            if any(f["severity"] == "critical" for f in host_findings):
-                max_severity = "critical"
-            elif any(f["severity"] == "high" for f in host_findings):
-                max_severity = "high"
-            elif any(f["severity"] == "medium" for f in host_findings):
-                max_severity = "medium"
-            elif any(f["severity"] == "low" for f in host_findings):
-                max_severity = "low"
-
-            nodes.append({
-                "id": ip,
-                "label": ip,
-                "is_internal": bool(row["is_internal"]),
-                "is_multicast": is_mcast,
-                "is_ipv6": is_v6,
-                "packets_sent": row["packets_sent"],
-                "packets_received": row["packets_received"],
-                "total_bytes": row["bytes_sent"] + row["bytes_received"],
-                "findings_count": len(host_findings),
-                "severity": max_severity,
-            })
 
         conv_rows = cursor.execute(
             "SELECT * FROM conversations ORDER BY byte_count DESC LIMIT 100"
         ).fetchall()
+        convs_data = [dict(row) for row in conv_rows]
 
-        edges = []
-        for row in conv_rows:
-            if row["host1"] in host_ips and row["host2"] in host_ips:
-                edges.append({
-                    "id": row["conversation_key"],
-                    "source": row["host1"],
-                    "target": row["host2"],
-                    "protocol": row["protocol"] or "unknown",
-                    "packet_count": row["packet_count"],
-                    "byte_count": row["byte_count"],
-                    "port1": row["port1"],
-                    "port2": row["port2"],
-                    "first_seen": row["first_seen"],
-                    "last_seen": row["last_seen"],
-                })
+        ports_map = defaultdict(set)
+        dns_map = defaultdict(list)
+        if host_ips:
+            placeholders = ",".join("?" for _ in host_ips)
+            port_rows = cursor.execute(
+                f"""
+                SELECT ip_dst, dst_port FROM packets
+                WHERE dst_port IS NOT NULL AND dst_port > 0 AND ip_dst IN ({placeholders})
+                GROUP BY ip_dst, dst_port LIMIT 500
+                """,
+                list(host_ips),
+            ).fetchall()
+            for r in port_rows:
+                ports_map[r[0]].add(r[1])
 
-        return {"nodes": nodes, "edges": edges}
+            dns_rows = cursor.execute(
+                f"""
+                SELECT ip_src, dns_query_name FROM packets
+                WHERE dns_query_name IS NOT NULL AND dns_query_name != '' AND ip_src IN ({placeholders})
+                GROUP BY ip_src, dns_query_name LIMIT 200
+                """,
+                list(host_ips),
+            ).fetchall()
+            for r in dns_rows:
+                if len(dns_map[r[0]]) < 5:
+                    dns_map[r[0]].append(r[1])
+
+        findings_data = [f.to_dict() for f in self.findings] if self.findings else []
+
+        return build_network_topology(
+            hosts_data=hosts_data,
+            conversations_data=convs_data,
+            findings_data=findings_data,
+            dns_queries_by_ip=dict(dns_map),
+            ports_by_ip=dict(ports_map),
+            max_nodes=max_nodes,
+        )
 
     def get_evidence_graph(
         self,
@@ -796,6 +786,8 @@ class AnalysisEngine:
           - 'resolution': Host -> Domain
           - 'alert': Finding -> Host
         """
+        from beacon.analysis.topology import classify_ip_address, infer_device_role
+
         cursor = self.db_conn.cursor()
 
         # 1. Hosts
@@ -810,14 +802,7 @@ class AnalysisEngine:
         for row in hosts_rows:
             ip = row["ip"]
             host_ips.add(ip)
-            is_mcast = False
-            is_v6 = False
-            try:
-                ip_obj = ip_address(ip)
-                is_mcast = ip_obj.is_multicast
-                is_v6 = ip_obj.version == 6
-            except ValueError:
-                pass
+            c = classify_ip_address(ip)
 
             h_findings = [f for f in active_findings if f.get("source_ip") == ip or f.get("destination_ip") == ip]
             max_sev = "info"
@@ -826,13 +811,25 @@ class AnalysisEngine:
                     max_sev = sev
                     break
 
+            role_name, role_badge, role_evidence = infer_device_role(ip, c, [])
+
             host_nodes.append({
                 "id": ip,
                 "label": ip,
                 "type": "host",
-                "is_internal": bool(row["is_internal"]),
-                "is_multicast": is_mcast,
-                "is_ipv6": is_v6,
+                "ip": ip,
+                "ip_version": c["ip_version"],
+                "subnet": c["subnet_id"],
+                "subnet_label": c["subnet_label"],
+                "subnet_category": c["category"],
+                "device_role": role_name,
+                "role_badge": role_badge,
+                "role_evidence": role_evidence,
+                "is_internal": c["is_internal"],
+                "is_multicast": c["is_multicast"],
+                "is_loopback": c["is_loopback"],
+                "is_link_local": c["is_link_local"],
+                "is_ipv6": c["ip_version"] == 6,
                 "packets_sent": row["packets_sent"],
                 "packets_received": row["packets_received"],
                 "total_bytes": row["bytes_sent"] + row["bytes_received"],

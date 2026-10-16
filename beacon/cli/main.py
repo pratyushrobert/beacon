@@ -22,11 +22,21 @@ import typer
 from click.core import UNSET
 from rich import box
 
-# Click 8.5+ compatibility patch for Typer
-_orig_opt_init = typer.core.TyperOption.__init__
-typer.core.TyperOption.__init__ = lambda self, *a, **kw: _orig_opt_init(
-    self, *a, **{**kw, "flag_value": (UNSET if kw.get("flag_value") is None else kw["flag_value"])}
-)
+# Click 8.5+ compatibility patch for Typer:
+# In Click 8.5+, click.Option treats flag_value != UNSET as an explicit flag indicator.
+# Some Typer versions pass flag_value=None to click.Option.__init__, causing non-boolean
+# options to be mis-inferred as flags. We patch click.Option.__init__ directly so that
+# TyperOption.__init__ signatures across different Typer versions (e.g. 0.12 vs 0.27)
+# are never corrupted with unexpected arguments.
+if hasattr(click.core, "UNSET"):
+    _orig_click_opt_init = click.Option.__init__
+
+    def _safe_click_opt_init(self, *args, **kwargs):
+        if kwargs.get("flag_value") is None:
+            kwargs["flag_value"] = click.core.UNSET
+        return _orig_click_opt_init(self, *args, **kwargs)
+
+    click.Option.__init__ = _safe_click_opt_init
 
 _orig_gm = click.ParamType.get_metavar
 click.ParamType.get_metavar = lambda self, param, ctx=None: (
@@ -114,13 +124,31 @@ def version_callback(show_version: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(
         None, "--version", "-v", callback=version_callback, is_eager=True, help="Show version and exit"
     ),
+    gui: bool = typer.Option(False, "--gui", help="Launch Beacon web dashboard in default browser"),
 ) -> None:
     """Beacon - Transform raw network traffic into actionable security intelligence."""
+    if ctx.invoked_subcommand is None:
+        from beacon.launcher import launch_beacon
+        sys.exit(launch_beacon())
+
+
+@app.command("launch")
+def launch_cmd(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host address to bind the server to"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    pin: Optional[str] = typer.Option(None, "--pin", help="Optional access PIN to require from remote clients"),
+    low_resource: bool = typer.Option(False, "--low-resource", help="Enable low-resource mode for older hardware"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not open default browser automatically"),
+) -> None:
+    """Start Beacon production server and automatically launch the dashboard in your default browser."""
+    from beacon.launcher import launch_beacon
+    sys.exit(launch_beacon(host=host, port=port, pin=pin, low_resource=low_resource, open_browser=not no_browser))
 
 
 @app.command("analyze")
@@ -1243,6 +1271,55 @@ def live_export(
 
     console.print(f"[green bold]✓ Exported incident [white]{incident_id}[/] to PCAP:[/] [cyan]{out_file}[/]")
     console.print(f"[dim]You can analyze this incident file with: [bold white]beacon analyze {out_file}[/][/]")
+
+
+@app.command("serve")
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host address to bind the server to (use 0.0.0.0 for LAN access)"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    pin: Optional[str] = typer.Option(None, "--pin", help="Optional access PIN to require from remote clients"),
+    low_resource: bool = typer.Option(False, "--low-resource", help="Enable low-resource mode for older hardware"),
+    reload: bool = typer.Option(False, "--reload", help="Enable live code reloading for development"),
+) -> None:
+    """Launch the Beacon investigation web server for local and remote access."""
+    import os
+    import socket
+
+    if low_resource:
+        os.environ["BEACON_LOW_RESOURCE"] = "1"
+        os.environ["BEACON_BUFFER_CAPACITY"] = "500"
+
+    if pin:
+        os.environ["BEACON_PIN"] = pin.strip()
+
+    # Discover local LAN IP
+    local_lan_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    # Header display
+    console.print()
+    profile_text = "[bold green]ACTIVE (RAM & CPU Optimized)[/]" if low_resource else "[dim]Standard[/]"
+    pin_text = f"[bold yellow]{pin}[/]" if pin else "[dim]None (Open access on trusted LAN)[/]"
+    console.print(Panel.fit(
+        f"[bold bright_cyan]BEACON CYBERSECURITY INVESTIGATION PLATFORM[/]\n"
+        f"[dim]Version {__version__} • Profile:[/] {profile_text}\n\n"
+        f"  [bold green]➜ Local Access:[/]   [white underline]http://localhost:{port}[/]\n"
+        f"  [bold cyan]➜ Remote / LAN:[/]   [white underline]http://{local_lan_ip}:{port}[/]  [dim](ASUS laptop, smartphone)[/]\n"
+        f"  [bold yellow]➜ Access PIN:[/]     {pin_text}\n\n"
+        f"[dim]Firewall rule (Windows):[/] [dim italic]netsh advfirewall firewall add rule name=\"Beacon\" dir=in action=allow protocol=TCP localport={port}[/]",
+        title="[bold white]Beacon Server Online[/]",
+        border_style="bright_blue",
+    ))
+    console.print()
+
+    import uvicorn
+    uvicorn.run("beacon.api.server:app", host=host, port=port, reload=reload)
 
 
 def cli_main() -> None:

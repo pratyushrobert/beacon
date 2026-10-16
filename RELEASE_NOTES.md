@@ -38,10 +38,8 @@ A **complete, production-ready network traffic analysis platform** with:
 
 ### Step 1: Install Dependencies
 ```bash
-cd D:\Project\Becon-claude
-
 # Backend
-pip install -r requirements.txt -r requirements-api.txt
+pip install -r requirements.txt
 
 # Frontend
 cd web

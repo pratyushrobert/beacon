@@ -111,6 +111,7 @@ export default function Dashboard() {
     loadData(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadData(true)
       }, 2500)
       return () => clearInterval(interval)

@@ -3,6 +3,7 @@
 import json
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional, Iterator, Dict, Any, List
 from dataclasses import dataclass
@@ -26,28 +27,40 @@ class TSharkInfo:
 
 
 class TSharkInterface:
-    """Interface for TShark command-line tool."""
+    """Interface for TShark command-line tool with built-in native PCAP/PCAPNG fallback."""
 
-    def __init__(self):
+    using_native: bool = False
+
+    def __init__(self, require_tshark: bool = False):
         """Initialize TShark interface and check installation."""
         self.tshark_info = self._check_tshark()
+        self.using_native = not self.tshark_info.installed
 
-        if not self.tshark_info.installed:
-            raise RuntimeError(
-                f"TShark not found: {self.tshark_info.error}\n"
-                "Please install Wireshark/TShark:\n"
-                "  Windows: https://www.wireshark.org/download.html\n"
-                "  Linux: sudo apt-get install tshark\n"
-                "  macOS: brew install wireshark"
-            )
-
-        logger.info(f"TShark found: {self.tshark_info.version} at {self.tshark_info.path}")
+        if self.using_native:
+            if require_tshark:
+                raise RuntimeError(
+                    f"TShark not found: {self.tshark_info.error}\n"
+                    "Please install Wireshark/TShark:\n"
+                    "  Windows: https://www.wireshark.org/download.html\n"
+                    "  Linux: sudo apt-get install tshark\n"
+                    "  macOS: brew install wireshark"
+                )
+            self.tshark_info.version = "Beacon Built-in Native Engine"
+            self.tshark_info.path = "builtin:pcap_native"
+            logger.info("TShark executable not found. Operating with Beacon Native Engine for offline PCAP/PCAPNG decoding.")
+        else:
+            logger.info(f"TShark found: {self.tshark_info.version} at {self.tshark_info.path}")
 
     def _check_tshark(self) -> TSharkInfo:
         """Check if TShark is installed and get version info."""
-        # Try common TShark paths on Windows
+        # Try common TShark paths on Linux and Windows
         common_paths = [
             shutil.which("tshark"),
+            "/usr/bin/tshark",
+            "/usr/sbin/tshark",
+            "/usr/local/bin/tshark",
+            "/opt/homebrew/bin/tshark",
+            "/Applications/Wireshark.app/Contents/MacOS/tshark",
             r"C:\Program Files\Wireshark\tshark.exe",
             r"C:\Program Files (x86)\Wireshark\tshark.exe",
             r"C:\Wireshark\tshark.exe",
@@ -62,7 +75,7 @@ class TSharkInterface:
         if not tshark_path:
             return TSharkInfo(
                 installed=False,
-                error="TShark executable not found in PATH",
+                error="TShark executable not found in PATH or standard system locations",
             )
 
         try:
@@ -97,44 +110,74 @@ class TSharkInterface:
                 error=f"Error checking TShark: {str(e)}",
             )
 
+    def _find_capinfos(self) -> Optional[str]:
+        """Locate capinfos executable if available."""
+        which_path = shutil.which("capinfos")
+        if which_path:
+            return which_path
+        if self.tshark_info and self.tshark_info.path:
+            tshark_dir = Path(self.tshark_info.path).parent
+            candidate = tshark_dir / ("capinfos.exe" if sys.platform == "win32" else "capinfos")
+            if candidate.exists():
+                return str(candidate)
+        for p in [
+            "/usr/bin/capinfos",
+            "/usr/sbin/capinfos",
+            "/usr/local/bin/capinfos",
+            "/opt/homebrew/bin/capinfos",
+            "/Applications/Wireshark.app/Contents/MacOS/capinfos",
+        ]:
+            if Path(p).exists():
+                return p
+        return None
+
     def get_capture_info(self, pcap_path: Path) -> Dict[str, Any]:
         """Get basic information about a capture file."""
         if not pcap_path.exists():
             raise FileNotFoundError(f"Capture file not found: {pcap_path}")
 
+        if self.using_native or not self.tshark_info.installed:
+            try:
+                from beacon.core.pcap_native import get_native_capture_info
+                return get_native_capture_info(pcap_path)
+            except Exception as e:
+                logger.debug(f"Native capture info note: {e}")
+
+        capinfos_bin = self._find_capinfos()
+        if capinfos_bin:
+            try:
+                # Use capinfos for capture statistics
+                result = subprocess.run(
+                    [capinfos_bin, "-M", "-c", "-u", "-a", "-e", "-S", str(pcap_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if result.returncode == 0:
+                    info = {"file_path": str(pcap_path)}
+                    for line in result.stdout.split("\n"):
+                        if ":" in line:
+                            key, value = line.split(":", 1)
+                            info[key.strip()] = value.strip()
+                    return info
+                else:
+                    logger.warning(f"capinfos failed: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"capinfos execution error: {e}")
+
         try:
-            # Use capinfos for capture statistics
-            result = subprocess.run(
-                ["capinfos", "-M", "-c", "-u", "-a", "-e", "-S", str(pcap_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            from beacon.core.pcap_native import get_native_capture_info
+            return get_native_capture_info(pcap_path)
+        except Exception:
+            pass
 
-            if result.returncode != 0:
-                logger.warning(f"capinfos failed: {result.stderr}")
-                # Fallback to basic file info
-                return {
-                    "file_path": str(pcap_path),
-                    "file_size": pcap_path.stat().st_size,
-                    "file_type": pcap_path.suffix,
-                }
-
-            # Parse capinfos output
-            info = {"file_path": str(pcap_path)}
-            for line in result.stdout.split("\n"):
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    info[key.strip()] = value.strip()
-
-            return info
-
-        except Exception as e:
-            logger.error(f"Error getting capture info: {e}")
-            return {
-                "file_path": str(pcap_path),
-                "error": str(e),
-            }
+        # Fallback to basic file info if capinfos is unavailable or failed
+        return {
+            "file_path": str(pcap_path),
+            "file_size": pcap_path.stat().st_size,
+            "file_type": pcap_path.suffix,
+        }
 
     def read_packets_json(
         self, pcap_path: Path, packet_limit: Optional[int] = None, display_filter: Optional[str] = None
@@ -142,8 +185,8 @@ class TSharkInterface:
         """
         Read packets from capture file as JSON stream using EK format.
 
-        Uses TShark's EK (Elasticsearch) format for memory-efficient streaming.
-        For large captures, this is preferred over the JSON array format.
+        Uses TShark's EK (Elasticsearch) format for memory-efficient streaming,
+        with seamless fallback to Beacon's native pure-Python PCAP decoder.
 
         Args:
             pcap_path: Path to PCAP/PCAPNG file
@@ -155,6 +198,11 @@ class TSharkInterface:
         """
         if not pcap_path.exists():
             raise FileNotFoundError(f"Capture file not found: {pcap_path}")
+
+        if self.using_native or not self.tshark_info.installed or not self.tshark_info.path:
+            from beacon.core.pcap_native import read_native_packets
+            yield from read_native_packets(pcap_path, packet_limit=packet_limit)
+            return
 
         # Use EK format for memory efficiency - outputs one JSON object per line
         cmd = [
@@ -198,128 +246,80 @@ class TSharkInterface:
 
             if process.returncode != 0:
                 stderr = process.stderr.read()
-                logger.error(f"TShark error: {stderr}")
-                raise RuntimeError(f"TShark failed with code {process.returncode}: {stderr}")
+                logger.warning(f"TShark exited with code {process.returncode}: {stderr}. Falling back to native PCAP decoder.")
+                from beacon.core.pcap_native import read_native_packets
+                yield from read_native_packets(pcap_path, packet_limit=packet_limit)
+                return
 
-            # Log any warnings
-            stderr = process.stderr.read()
-            if stderr:
-                logger.debug(f"TShark warnings: {stderr}")
-
-        except FileNotFoundError:
-            raise RuntimeError(f"TShark executable not found at {self.tshark_info.path}")
         except Exception as e:
-            logger.error(f"Error reading packets: {e}")
-            raise
+            logger.warning(f"TShark execution note: {e}. Falling back to native PCAP decoder.")
+            from beacon.core.pcap_native import read_native_packets
+            yield from read_native_packets(pcap_path, packet_limit=packet_limit)
 
     def read_packets_ek(
         self, pcap_path: Path, packet_limit: Optional[int] = None
     ) -> Iterator[Dict[str, Any]]:
         """
-        Read packets using TShark's EK (Elasticsearch) format.
-
-        EK format outputs one JSON object per line, which is more memory-efficient
-        for large captures than the standard JSON array format.
-
-        Args:
-            pcap_path: Path to PCAP/PCAPNG file
-            packet_limit: Maximum number of packets to read
-
-        Yields:
-            Dict containing packet data
+        Read packets using EK format or native decoder.
         """
-        if not pcap_path.exists():
-            raise FileNotFoundError(f"Capture file not found: {pcap_path}")
-
-        cmd = [
-            self.tshark_info.path,
-            "-r", str(pcap_path),
-            "-T", "ek",  # Elasticsearch JSON format (one object per line)
-        ]
-
-        if packet_limit:
-            cmd.extend(["-c", str(packet_limit)])
-
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,  # Line buffered
-            )
-
-            # Read line by line
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    try:
-                        packet = json.loads(line)
-                        yield packet
-                    except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse packet line: {line[:100]}...")
-                        continue
-
-            process.wait()
-
-            if process.returncode != 0:
-                stderr = process.stderr.read()
-                logger.error(f"TShark error: {stderr}")
-                raise RuntimeError(f"TShark failed: {stderr}")
-
-        except Exception as e:
-            logger.error(f"Error reading packets with EK format: {e}")
-            raise
+        return self.read_packets_json(pcap_path, packet_limit=packet_limit)
 
     def get_packet_count(self, pcap_path: Path) -> int:
         """Get total packet count quickly without parsing full capture."""
+        if self.using_native or not self.tshark_info.installed:
+            try:
+                from beacon.core.pcap_native import get_native_packet_count
+                return get_native_packet_count(pcap_path)
+            except Exception as e:
+                logger.debug(f"Native packet count check failed: {e}")
+
+        # 1. Fast capinfos check
+        capinfos_bin = self._find_capinfos()
+        if capinfos_bin:
+            try:
+                capinfos_res = subprocess.run(
+                    [capinfos_bin, "-c", "-M", str(pcap_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if capinfos_res.returncode == 0:
+                    for line in capinfos_res.stdout.splitlines():
+                        if "number of packets" in line.lower() or "packets:" in line.lower():
+                            val = line.split(":")[-1].strip()
+                            if val.isdigit():
+                                return int(val)
+            except Exception as e:
+                logger.debug(f"capinfos packet count check failed: {e}")
+
+        # 2. TShark IO statistics check
+        if self.tshark_info.path:
+            try:
+                result = subprocess.run(
+                    [self.tshark_info.path, "-r", str(pcap_path), "-q", "-z", "io,stat,0"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                if result.returncode == 0:
+                    # In io,stat,0 output, data row format is: | <interval> | <frames> | <bytes> |
+                    for line in result.stdout.splitlines():
+                        if "<>" in line and "|" in line:
+                            parts = [p.strip() for p in line.split("|") if p.strip()]
+                            if len(parts) >= 2 and parts[1].isdigit():
+                                return int(parts[1])
+            except Exception as e:
+                logger.debug(f"TShark io,stat packet count check failed: {e}")
+
+        # 3. Fallback to native packet counter
         try:
-            # 1. Fast capinfos check
-            capinfos_res = subprocess.run(
-                ["capinfos", "-c", "-M", str(pcap_path)],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if capinfos_res.returncode == 0:
-                for line in capinfos_res.stdout.splitlines():
-                    if "number of packets" in line.lower() or "packets:" in line.lower():
-                        val = line.split(":")[-1].strip()
-                        if val.isdigit():
-                            return int(val)
-
-            # 2. TShark IO statistics check
-            result = subprocess.run(
-                [self.tshark_info.path, "-r", str(pcap_path), "-q", "-z", "io,stat,0"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if result.returncode == 0:
-                # In io,stat,0 output, data row format is: | <interval> | <frames> | <bytes> |
-                for line in result.stdout.splitlines():
-                    if "<>" in line and "|" in line:
-                        parts = [p.strip() for p in line.split("|") if p.strip()]
-                        if len(parts) >= 2 and parts[1].isdigit():
-                            return int(parts[1])
-
-            # 3. Fallback: count lines of packet numbers
-            result = subprocess.run(
-                [self.tshark_info.path, "-r", str(pcap_path), "-T", "fields", "-e", "frame.number"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                lines = [l for l in result.stdout.splitlines() if l.strip()]
-                return len(lines)
-
-            return 0
-
+            from beacon.core.pcap_native import get_native_packet_count
+            return get_native_packet_count(pcap_path)
         except Exception as e:
-            logger.error(f"Error getting packet count: {e}")
-            return 0
+            logger.debug(f"Native fallback packet counting failed: {e}")
+
+        return 0
 
 
 # Singleton instance

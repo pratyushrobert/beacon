@@ -47,6 +47,7 @@ export default function Findings() {
     loadFindings(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadFindings(true)
       }, 2500)
       return () => clearInterval(interval)

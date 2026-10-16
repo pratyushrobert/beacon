@@ -5,20 +5,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import hmac
 import os
+import secrets
 import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import (
     BackgroundTasks,
+    Depends,
     FastAPI,
     File,
+    Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -31,6 +36,7 @@ from fastapi.responses import (
     PlainTextResponse,
     Response,
 )
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from beacon.analysis.conversations import ConversationAnalyzer
@@ -47,18 +53,108 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(title="Beacon API", version="0.1.0", description="Cybersecurity Network Traffic Investigation Platform")
 
-# Enable CORS for React frontend
+# Enable CORS for local network and web clients (supports ASUS laptop, smartphone, and dev servers)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+def get_configured_pin() -> Optional[str]:
+    pin = os.environ.get("BEACON_PIN", "").strip()
+    return pin if pin else None
+
+
+class PinRateLimiter:
+    """Sliding-window IP rate limiter to protect PIN verification from brute-force attacks."""
+
+    def __init__(self, max_attempts: int = 5, window_seconds: float = 60.0, lockout_seconds: float = 60.0):
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self.lockout_seconds = lockout_seconds
+        self._attempts: Dict[str, List[float]] = {}
+        self._lockouts: Dict[str, float] = {}
+
+    def is_locked(self, client_ip: str) -> Tuple[bool, float]:
+        """Check if client IP is locked out. Returns (is_locked, remaining_seconds)."""
+        now = time.time()
+        lockout_until = self._lockouts.get(client_ip, 0.0)
+        if now < lockout_until:
+            return True, max(1.0, round(lockout_until - now, 1))
+        if client_ip in self._lockouts:
+            del self._lockouts[client_ip]
+        return False, 0.0
+
+    def record_attempt(self, client_ip: str, success: bool) -> None:
+        """Record an attempt. Clears on success; increments lockout window on repeated failures."""
+        now = time.time()
+        if success:
+            self._attempts.pop(client_ip, None)
+            self._lockouts.pop(client_ip, None)
+            return
+
+        attempts = self._attempts.get(client_ip, [])
+        attempts = [t for t in attempts if now - t <= self.window_seconds]
+        attempts.append(now)
+        self._attempts[client_ip] = attempts
+
+        if len(attempts) >= self.max_attempts:
+            self._lockouts[client_ip] = now + self.lockout_seconds
+
+    def reset(self) -> None:
+        """Reset rate limiter state (used in testing)."""
+        self._attempts.clear()
+        self._lockouts.clear()
+
+
+pin_rate_limiter = PinRateLimiter()
+
+# Ephemeral WebSocket tickets store: ticket -> expires_at
+_ws_tickets: Dict[str, float] = {}
+
+
+def create_ws_ticket(lifetime_seconds: float = 30.0) -> str:
+    """Generate a single-use cryptographically secure ticket for WebSocket connection."""
+    now = time.time()
+    # Expire old tickets
+    expired = [t for t, exp in _ws_tickets.items() if now > exp]
+    for t in expired:
+        _ws_tickets.pop(t, None)
+
+    ticket = secrets.token_urlsafe(32)
+    _ws_tickets[ticket] = now + lifetime_seconds
+    return ticket
+
+
+def validate_and_consume_ws_ticket(ticket: str) -> bool:
+    """Validate and consume a single-use ticket."""
+    now = time.time()
+    exp = _ws_tickets.pop(ticket, None)
+    if exp and now <= exp:
+        return True
+    return False
+
+
+def verify_access_pin(
+    x_beacon_pin: Optional[str] = Header(None, alias="X-Beacon-PIN"),
+) -> bool:
+    """Validate access PIN header if BEACON_PIN environment variable is configured."""
+    required_pin = get_configured_pin()
+    if not required_pin:
+        return True
+    if x_beacon_pin and hmac.compare_digest(x_beacon_pin.encode("utf-8"), required_pin.encode("utf-8")):
+        return True
+    raise HTTPException(
+        status_code=401,
+        detail="Valid Beacon access PIN required to perform this action. Send via X-Beacon-PIN header.",
+    )
+
 # Persistent catalog directory
-catalog_dir = Path("cache")
-catalog_dir.mkdir(exist_ok=True)
+from beacon.utils.paths import get_beacon_cache_dir
+catalog_dir = get_beacon_cache_dir()
+catalog_dir.mkdir(parents=True, exist_ok=True)
 catalog_file = catalog_dir / "catalog.json"
 
 upload_dir = Path(tempfile.gettempdir()) / "beacon_uploads"
@@ -101,9 +197,61 @@ class ModeChangeRequest(BaseModel):
     mode: str
 
 
-@app.get("/")
-async def root() -> Dict[str, str]:
-    """API root endpoint."""
+class AuthVerifyRequest(BaseModel):
+    pin: str
+
+
+@app.get("/api/auth/status")
+async def get_auth_status(
+    x_beacon_pin: Optional[str] = Header(None, alias="X-Beacon-PIN"),
+    pin: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Check whether access protection is active and if current client is authenticated."""
+    required_pin = get_configured_pin()
+    if not required_pin:
+        return {"auth_required": False, "authenticated": True}
+    provided = x_beacon_pin or pin
+    return {"auth_required": True, "authenticated": provided == required_pin}
+
+
+@app.post("/api/auth/verify")
+async def verify_auth_pin_endpoint(req: AuthVerifyRequest) -> Dict[str, Any]:
+    """Verify access PIN provided by remote client."""
+    required_pin = get_configured_pin()
+    if not required_pin:
+        return {"success": True, "auth_required": False}
+    if req.pin == required_pin:
+        return {"success": True, "auth_required": True}
+    raise HTTPException(status_code=401, detail="Invalid access PIN")
+
+
+@app.get("/api/system/status")
+async def get_system_status() -> Dict[str, Any]:
+    """Return host and backend telemetry for low-resource profiling and remote monitoring."""
+    service = get_live_service()
+    stats = service.get_stats()
+    is_low_res = os.environ.get("BEACON_LOW_RESOURCE", "0") in ("1", "true", "True")
+    from beacon.live.service import get_current_process_memory_mb
+    rss_mb = get_current_process_memory_mb()
+
+    return {
+        "status": "online",
+        "low_resource_mode": is_low_res,
+        "process_memory_mb": rss_mb,
+        "live_capture_status": stats.status.value,
+        "buffer_occupancy": service.buffer.occupancy,
+        "buffer_capacity": service.buffer.capacity,
+        "total_packets_ingested": service.buffer.total_ingested,
+        "total_packets_evicted": service.buffer.total_evicted,
+        "dropped_packets": service.dropped_packets,
+        "incidents_count": service.evidence_store.incidents_count,
+        "auth_required": bool(get_configured_pin()),
+    }
+
+
+@app.get("/api")
+async def api_info() -> Dict[str, str]:
+    """API info endpoint."""
     return {
         "name": "Beacon API",
         "version": "0.1.0",
@@ -166,12 +314,13 @@ async def list_analyses() -> Dict[str, List[Dict[str, Any]]]:
     return {"analyses": summary_list}
 
 
-@app.post("/api/upload")
+@app.post("/api/upload", dependencies=[Depends(verify_access_pin)])
 async def upload_pcap(file: UploadFile = File(...)) -> Dict[str, Any]:
     """Upload a PCAP/PCAPNG file and register it in catalog."""
     filename = file.filename or "capture.pcap"
-    if not (filename.endswith(".pcap") or filename.endswith(".pcapng")):
-        raise HTTPException(status_code=400, detail="Only PCAP and PCAPNG files are supported (.pcap, .pcapng)")
+    lower_name = filename.lower()
+    if not (lower_name.endswith(".pcap") or lower_name.endswith(".pcapng") or lower_name.endswith(".cap")):
+        raise HTTPException(status_code=400, detail="Only PCAP, PCAPNG, and CAP files are supported (.pcap, .pcapng, .cap)")
 
     analysis_id = str(uuid.uuid4())
     file_path = upload_dir / f"{analysis_id}_{filename}"
@@ -681,7 +830,7 @@ async def switch_mode(analysis_id: str, request: ModeChangeRequest) -> Dict[str,
     return analysis["results"]
 
 
-@app.get("/api/analysis/{analysis_id}/export")
+@app.get("/api/analysis/{analysis_id}/export", dependencies=[Depends(verify_access_pin)])
 async def export_report(analysis_id: str, format: str = Query("html", pattern="^(html|json|csv|findings_csv|hosts_csv|convs_csv)$")) -> Response:
     """Export investigation report in HTML, JSON, or CSV format."""
     if analysis_id == "live":
@@ -735,7 +884,7 @@ async def export_report(analysis_id: str, format: str = Query("html", pattern="^
     raise HTTPException(status_code=400, detail="Unsupported format")
 
 
-@app.delete("/api/analysis/{analysis_id}")
+@app.delete("/api/analysis/{analysis_id}", dependencies=[Depends(verify_access_pin)])
 async def delete_analysis(analysis_id: str) -> Dict[str, str]:
     """Delete an analysis record and its uploaded capture file."""
     if analysis_id == "live":
@@ -856,7 +1005,7 @@ async def get_live_interfaces() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/live/start")
+@app.post("/api/live/start", dependencies=[Depends(verify_access_pin)])
 async def start_live_capture(req: LiveStartRequest) -> Dict[str, Any]:
     """Start continuous live network capture on the designated interface."""
     service = get_live_service()
@@ -874,7 +1023,7 @@ async def start_live_capture(req: LiveStartRequest) -> Dict[str, Any]:
     return {"status": "started", "stats": service.get_stats().to_dict()}
 
 
-@app.post("/api/live/stop")
+@app.post("/api/live/stop", dependencies=[Depends(verify_access_pin)])
 async def stop_live_capture() -> Dict[str, Any]:
     """Stop continuous live network capture."""
     service = get_live_service()
@@ -882,7 +1031,7 @@ async def stop_live_capture() -> Dict[str, Any]:
     return {"status": "stopped", "stats": service.get_stats().to_dict()}
 
 
-@app.post("/api/live/pause")
+@app.post("/api/live/pause", dependencies=[Depends(verify_access_pin)])
 async def pause_live_capture() -> Dict[str, Any]:
     """Pause detection and packet processing in live capture."""
     service = get_live_service()
@@ -890,7 +1039,7 @@ async def pause_live_capture() -> Dict[str, Any]:
     return {"status": "paused", "stats": service.get_stats().to_dict()}
 
 
-@app.post("/api/live/resume")
+@app.post("/api/live/resume", dependencies=[Depends(verify_access_pin)])
 async def resume_live_capture() -> Dict[str, Any]:
     """Resume live capture after being paused."""
     service = get_live_service()
@@ -977,7 +1126,7 @@ async def update_live_incident_notes(incident_id: str, req: LiveNotesRequest) ->
     return {"incident_id": incident_id, "notes": req.notes}
 
 
-@app.get("/api/live/incidents/{incident_id}/export")
+@app.get("/api/live/incidents/{incident_id}/export", dependencies=[Depends(verify_access_pin)])
 async def export_live_incident_pcap(incident_id: str):
     """Export the retained packets for an incident to a standard PCAP file."""
     service = get_live_service()
@@ -992,8 +1141,16 @@ async def export_live_incident_pcap(incident_id: str):
 
 
 @app.websocket("/api/live/ws")
+@app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     """WebSocket endpoint streaming real-time live capture telemetry and alerts."""
+    required_pin = get_configured_pin()
+    if required_pin:
+        pin = websocket.query_params.get("pin") or websocket.headers.get("x-beacon-pin")
+        if pin != required_pin:
+            await websocket.close(code=1008)
+            return
+
     await websocket.accept()
     service = get_live_service()
     loop = asyncio.get_running_loop()
@@ -1059,6 +1216,57 @@ async def websocket_live_endpoint(websocket: WebSocket):
         service.unsubscribe(on_broadcast)
 
 
+# Mount pre-built React frontend if present (Production single-process deployment)
+from beacon.utils.paths import find_frontend_dist
+
+frontend_dist = find_frontend_dist()
+if frontend_dist and (frontend_dist / "index.html").exists():
+    if (frontend_dist / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve built React single page application for browser clients."""
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="API route not found")
+        target = frontend_dist / full_path
+        if target.is_file():
+            return FileResponse(str(target))
+        return FileResponse(str(frontend_dist / "index.html"))
+else:
+    @app.get("/")
+    async def serve_missing_frontend():
+        """Helpful fallback response when frontend production build is not yet generated."""
+        return HTMLResponse(
+            """<!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <title>Beacon — Production Frontend Assets Missing</title>
+                <style>
+                    body { background: #080c14; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; padding: 3rem; text-align: center; }
+                    .card { max-width: 650px; margin: 4rem auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 2rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+                    h1 { color: #38bdf8; font-size: 1.5rem; margin-bottom: 1rem; }
+                    p { color: #94a3b8; font-size: 0.95rem; line-height: 1.6; }
+                    code { background: #1e293b; color: #f1f5f9; padding: 0.2rem 0.5rem; border-radius: 4px; }
+                    pre { background: #020617; border: 1px solid #334155; padding: 1rem; border-radius: 6px; text-align: left; overflow-x: auto; color: #a5f3fc; }
+                    a { color: #38bdf8; text-decoration: none; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>Beacon API Online — Frontend Assets Missing</h1>
+                    <p>The Beacon backend is active and healthy, but pre-built React production assets (<code>web/dist/index.html</code>) were not found.</p>
+                    <p>To compile the production frontend:</p>
+                    <pre>cd web && npm install && npm run build</pre>
+                    <p>Backend API status is available at <a href="/api/health">/api/health</a>.</p>
+                </div>
+            </body>
+            </html>""",
+            status_code=503,
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

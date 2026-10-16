@@ -17,12 +17,13 @@ import {
   Zap,
   Flame,
   CheckCircle2,
-  History
+  History,
+  X
 } from 'lucide-react'
 import { useMode } from '../context/ModeContext'
 import axios from 'axios'
 
-export default function Sidebar({ currentAnalysis }) {
+export default function Sidebar({ currentAnalysis, onClose }) {
   const location = useLocation()
   const { mode, setMode, isFreeBird, isBlue, isRed, themeColors } = useMode()
 
@@ -76,7 +77,7 @@ export default function Sidebar({ currentAnalysis }) {
         className="flex items-center justify-between h-14 px-4 border-b"
         style={{ borderColor: 'var(--border-subtle)' }}
       >
-        <Link to="/upload" className="flex items-center gap-2.5 group">
+        <Link to="/upload" onClick={() => onClose?.()} className="flex items-center gap-2.5 group">
           {/* Custom Dual/Single Identity Glyph */}
           <div className="relative flex items-center justify-center w-7 h-7 rounded-md bg-dark-900 border border-dark-800 shadow-sm overflow-hidden">
             {isFreeBird ? (
@@ -127,6 +128,17 @@ export default function Sidebar({ currentAnalysis }) {
             </span>
           </div>
         </Link>
+
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-md text-dark-400 hover:text-white hover:bg-white/10 md:hidden"
+            title="Close navigation menu"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
       {/* Navigation List */}
@@ -139,8 +151,9 @@ export default function Sidebar({ currentAnalysis }) {
             <Link
               key={item.name}
               to={item.href}
+              onClick={() => onClose?.()}
               className={`
-                flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-medium transition-all duration-150
+                flex items-center justify-between px-3 py-2 sm:px-2.5 sm:py-1.5 rounded-md text-xs font-medium transition-all duration-150 min-h-[38px]
                 ${item.disabled ? 'pointer-events-none opacity-30 text-dark-600' : ''}
                 ${
                   isActive

@@ -51,6 +51,7 @@ export default function Storyline() {
     loadStoryline(false)
     if (analysisId === 'live') {
       const interval = setInterval(() => {
+        if (document.hidden) return
         loadStoryline(true)
       }, 2500)
       return () => clearInterval(interval)

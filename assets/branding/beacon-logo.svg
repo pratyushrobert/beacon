@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070a13" />
+      <stop offset="50%" stop-color="#0b1222" />
+      <stop offset="100%" stop-color="#050811" />
+    </linearGradient>
+
+    <!-- Beacon Pulse Electric Cyan/Blue Gradient -->
+    <linearGradient id="beam-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- Threat Red Indicator Gradient -->
+    <linearGradient id="alert-red" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e" />
+      <stop offset="100%" stop-color="#be123c" />
+    </linearGradient>
+
+    <!-- Radar Glow Filter -->
+    <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Technical Grid Pattern -->
+    <pattern id="tech-grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="0.75" fill="#334155" opacity="0.4" />
+    </pattern>
+  </defs>
+
+  <!-- Container Box -->
+  <rect width="800" height="200" rx="16" fill="url(#bg-grad)" stroke="#1e293b" stroke-width="2" />
+  <rect width="800" height="200" rx="16" fill="url(#tech-grid)" opacity="0.7" />
+
+  <!-- Radar & Beacon Symbol Group -->
+  <g transform="translate(100, 100)">
+    <!-- Outer Protective Hex Ring -->
+    <polygon points="0,-72 62,-36 62,36 0,72 -62,36 -62,-36" fill="none" stroke="#1e293b" stroke-width="2" />
+    
+    <!-- Outer Radar Range Ring -->
+    <circle cx="0" cy="0" r="56" fill="none" stroke="#334155" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.8" />
+    
+    <!-- Red Alert Arc (Investigation Flag) -->
+    <path d="M 39.6 -39.6 A 56 56 0 0 1 56 0" fill="none" stroke="url(#alert-red)" stroke-width="3.5" filter="url(#glow-red)" />
+    <circle cx="39.6" cy="-39.6" r="3.5" fill="#f43f5e" filter="url(#glow-red)" />
+
+    <!-- Mid Range Ring -->
+    <circle cx="0" cy="0" r="38" fill="none" stroke="#38bdf8" stroke-width="1.5" opacity="0.4" />
+
+    <!-- Radar Crosshairs -->
+    <line x1="-60" y1="0" x2="60" y2="0" stroke="#334155" stroke-width="1" opacity="0.6" />
+    <line x1="0" y1="-60" x2="0" y2="60" stroke="#334155" stroke-width="1" opacity="0.6" />
+
+    <!-- Sweeping Radar Beam Wave -->
+    <path d="M 0 0 L 26.8 -26.8 A 38 38 0 0 0 -26.8 -26.8 Z" fill="url(#beam-cyan)" opacity="0.25" />
+    <line x1="0" y1="0" x2="26.8" y2="-26.8" stroke="#38bdf8" stroke-width="2" filter="url(#glow-cyan)" />
+
+    <!-- Concentric Inner Signal Rings -->
+    <circle cx="0" cy="0" r="20" fill="#0b1329" stroke="#0284c7" stroke-width="2" />
+    <circle cx="0" cy="0" r="9" fill="url(#beam-cyan)" filter="url(#glow-cyan)" />
+
+    <!-- Core Focal Emitter -->
+    <circle cx="0" cy="0" r="4" fill="#ffffff" />
+  </g>
+
+  <!-- Typography: BEACON -->
+  <g transform="translate(200, 115)">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="62" font-weight="900" letter-spacing="8" fill="#ffffff">
+      BEA<tspan fill="#38bdf8">C</tspan>ON
+    </text>
+
+    <!-- Subtitle & Identity -->
+    <text y="32" font-family="'JetBrains Mono', 'Fira Code', 'Consolas', monospace" font-size="13" font-weight="600" letter-spacing="4" fill="#94a3b8">
+      NETWORK INVESTIGATION PLATFORM
+    </text>
+
+    <!-- Pill Badges -->
+    <g transform="translate(0, 48)">
+      <rect x="0" y="0" width="80" height="20" rx="4" fill="#0f172a" stroke="#334155" stroke-width="1" />
+      <text x="40" y="14" font-family="monospace" font-size="10" font-weight="bold" fill="#38bdf8" text-anchor="middle">OFFLINE</text>
+
+      <rect x="88" y="0" width="60" height="20" rx="4" fill="#0f172a" stroke="#334155" stroke-width="1" />
+      <text x="118" y="14" font-family="monospace" font-size="10" font-weight="bold" fill="#10b981" text-anchor="middle">LIVE</text>
+
+      <rect x="156" y="0" width="124" height="20" rx="4" fill="#0f172a" stroke="#334155" stroke-width="1" />
+      <text x="218" y="14" font-family="monospace" font-size="10" font-weight="bold" fill="#f43f5e" text-anchor="middle">EVIDENCE-LINKED</text>
+    </g>
+  </g>
+</svg>

@@ -11,7 +11,6 @@
 ```bash
 cd D:\Project\Becon-claude
 pip install -r requirements.txt
-pip install -r requirements-api.txt
 ```
 
 ### 2. Install Node.js Dependencies
@@ -144,7 +143,7 @@ npm run build
 ## Troubleshooting
 
 ### API won't start
-- Check Python dependencies: `pip install -r requirements.txt -r requirements-api.txt`
+- Check Python dependencies: `pip install -r requirements.txt`
 - Verify port 8000 is not in use
 - Check TShark is installed: `tshark --version`
 

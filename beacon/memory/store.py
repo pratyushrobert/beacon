@@ -28,9 +28,8 @@ class MemoryStore:
         Default database location: cache/beacon_memory.db
         """
         if db_path is None:
-            cache_dir = Path("cache")
-            cache_dir.mkdir(exist_ok=True)
-            db_path = cache_dir / "beacon_memory.db"
+            from beacon.utils.paths import get_beacon_cache_dir
+            db_path = get_beacon_cache_dir() / "beacon_memory.db"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

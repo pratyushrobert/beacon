@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <defs>
+    <linearGradient id="mark-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#0b1222" />
+    </linearGradient>
+
+    <linearGradient id="mark-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <linearGradient id="mark-red" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e" />
+      <stop offset="100%" stop-color="#be123c" />
+    </linearGradient>
+
+    <filter id="mark-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="128" height="128" rx="28" fill="url(#mark-bg)" stroke="#1e293b" stroke-width="2" />
+
+  <g transform="translate(64, 64)">
+    <!-- Hexagonal Outer Frame -->
+    <polygon points="0,-48 41.5,-24 41.5,24 0,48 -41.5,24 -41.5,-24" fill="none" stroke="#1e293b" stroke-width="2" />
+
+    <!-- Outer Radar Range Ring -->
+    <circle cx="0" cy="0" r="38" fill="none" stroke="#334155" stroke-width="1.2" stroke-dasharray="3 2" />
+
+    <!-- Red Alert Arc (Threat Flag) -->
+    <path d="M 26.8 -26.8 A 38 38 0 0 1 38 0" fill="none" stroke="url(#mark-red)" stroke-width="3" filter="url(#mark-glow)" />
+    <circle cx="26.8" cy="-26.8" r="2.5" fill="#f43f5e" />
+
+    <!-- Crosshairs -->
+    <line x1="-42" y1="0" x2="42" y2="0" stroke="#334155" stroke-width="1" opacity="0.6" />
+    <line x1="0" y1="-42" x2="0" y2="42" stroke="#334155" stroke-width="1" opacity="0.6" />
+
+    <!-- Sweeping Radar Beam -->
+    <path d="M 0 0 L 18 -18 A 25 25 0 0 0 -18 -18 Z" fill="url(#mark-cyan)" opacity="0.35" />
+    <line x1="0" y1="0" x2="18" y2="-18" stroke="#38bdf8" stroke-width="1.5" filter="url(#mark-glow)" />
+
+    <!-- Inner Core Signal Rings -->
+    <circle cx="0" cy="0" r="14" fill="#0b1329" stroke="#0284c7" stroke-width="1.8" />
+    <circle cx="0" cy="0" r="6" fill="url(#mark-cyan)" filter="url(#mark-glow)" />
+    <circle cx="0" cy="0" r="2.5" fill="#ffffff" />
+  </g>
+</svg>
