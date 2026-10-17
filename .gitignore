@@ -108,3 +108,4 @@ cache/
 reports/generated/
 reports/*.pdf
 reports/*.html
+/beacon-static-site/
